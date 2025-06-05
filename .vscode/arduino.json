@@ -1,0 +1,8 @@
+{
+    "sketch": "EEprom_recorder.ino",
+    "output": "build",
+    "configuration": "cpu=atmega2560",
+    "board": "arduino:avr:mega",
+    "port": "COM6",
+    "programmer": "avrispmkii"
+}
