@@ -1,5 +1,8 @@
-
 #include <string.h>
+#include <LibPrintf.h>
+#include "rom.h"
+
+//const byte rom[] = { 0x09, 0x80, 0x19, 0x80, 0xC3, 0xC2, 0xCD, 0x38, 0x30, 0x8E, 0x16, 0xD0, 0x20, 0xA3, 0xFD, 0x20 };
 
 int OE = 19;
 int WE = 29; 
@@ -12,10 +15,9 @@ const unsigned int addressPin[] = { 35, 36, 37, 38, 39, 40, 41, 42, 25, 23, 17, 
 // Vai e vem 3e 80 d3 00 0f fe 01 28 02 18 f7 d3 00 07 fe 80 28 f0 18 f7
 // ..\SerialComm\bin\Debug\netcoreapp3.1\SerialComm.exe com6 115200
 
-
 int addressSize = 15;
 int16_t currentAddress = 0;
-const unsigned int WCT = 7;
+const unsigned int WCT = 8;//7;
 int maxAddress = 0;
 const boolean logData = false;
 int size = 0;
@@ -66,6 +68,13 @@ void loop() {
     } 
     else if (command.startsWith("w ")) {
       commandWrite(command);
+    }
+    else if (command.startsWith("rom")) {
+      commandWritePage(bin, sizeof(bin), false);
+    }
+    else if (command.startsWith("clear")) {
+
+      commandWritePage(bin, sizeof(bin), true);
     }
     else 
     {
@@ -169,7 +178,7 @@ void commandRead(String strCommand)
           }
           else if (itemCount == 9)
           {
-            Serial.print("    ");
+            Serial.print("  ");
           }
           sprintf(buf, "%02x ", readEEPROM(i));
           Serial.print(buf);
@@ -188,6 +197,105 @@ void commandRead(String strCommand)
     strCommand = strCommand.substring(index + 1);
     parmNo = parmNo + 1;
   }
+}
+
+uint8_t readDataBus() {
+  uint8_t data = 0;
+  for (int pin = 7; pin >= 0; pin -= 1) {
+    data = (data << 1) + digitalRead(dataPin[pin]);
+  }
+  return data;
+}
+
+bool waitForWriteCycleEnd(byte lastValue)
+{
+    // Verify programming complete by reading the last value back until it matches the
+    // value written twice in a row.  The D7 bit will read the inverse of last written
+    // data and the D6 bit will toggle on each read while in programming mode.
+    //
+    // This loop code takes about 18uSec to execute.  The max readcount is set to the
+    // device's maxReadTime (in uSecs) divided by ten rather than eighteen to ensure
+    // that it runs at least as long as the chip's timeout value, even if some code
+    // optimizations are made later. In actual practice, the loop will terminate much
+    // earlier because it will detect the end of the write well before the max time.
+    int mMaxWriteTime = 10;
+    byte b1=0, b2=0;
+    setDataPins(INPUT);
+    delayMicroseconds(1);
+    for (unsigned readCount = 1; (readCount < (mMaxWriteTime * 100)); readCount++)
+    {
+        digitalWrite(CE, LOW);
+        digitalWrite(OE, LOW);
+        delayMicroseconds(1);
+        b1 = readDataBus();
+        digitalWrite(OE, HIGH);
+        digitalWrite(CE, HIGH);
+        digitalWrite(CE, LOW);
+        digitalWrite(OE, LOW);
+        delayMicroseconds(1);
+        b2 = readDataBus();
+        digitalWrite(OE, HIGH);
+        digitalWrite(CE, HIGH);
+        if ((b1 == b2) && (b1 == lastValue))
+            return true;
+    }
+    return false;
+}
+
+void commandWritePage(byte rom[], uint16_t size, bool clear) {
+    uint16_t chunkSize = 64;
+    printf("Start recording...\n\n");
+    unsigned long startTime = millis();
+    uint16_t chunkQty = size / chunkSize;
+    // print orientation
+    printf("[");
+    for (uint16_t q = 0; q<chunkQty; q++)
+        printf("-");
+    Serial.println("]");
+    Serial.print(" ");
+    
+    uint16_t address = 0;
+    for (uint16_t c = 0; c < chunkQty; c++) 
+    {
+        setAddressPin(OUTPUT);
+        setDataPins(OUTPUT);
+        address = c*chunkSize;
+        for (int j = 0; j < addressSize; j++) 
+        {
+            if (j >= 6)
+                digitalWrite(addressPin[j], (address & 1) == 1 ? HIGH : LOW);
+            address = address >> 1;
+        }
+        Serial.print("#");
+        digitalWrite(OE, HIGH);
+        digitalWrite(WE, HIGH);
+        digitalWrite(CE, LOW);  
+        bool status = false;
+        for (int i = 0; i < chunkSize; i++)
+        {
+            byte data = clear ? 0 : pgm_read_word_near(&(rom[i+c*chunkSize]));
+            address = i+c*chunkSize;
+            //Set Address for chunck            
+            for (int j = 0; j < 6; j++) {
+                digitalWrite(addressPin[j], (address & 1) == 1 ? HIGH : LOW);
+                address = address >> 1;
+            }
+            // Set Data
+            for (int pin = 0; pin <= 7; pin += 1) {
+                digitalWrite(dataPin[pin], data & 1);
+                data = data >> 1;
+            }
+            delayMicroseconds(1);
+            digitalWrite(WE, LOW);
+            delayMicroseconds(1);
+            digitalWrite(WE, HIGH);
+        }
+        status = waitForWriteCycleEnd(pgm_read_word_near(&(rom[c*chunkSize-1])));
+        digitalWrite(CE, HIGH);  
+    }
+    unsigned long endTime = millis();
+    unsigned long elapsedTime = endTime - startTime;
+    printf("\n\ntime: %5.2fs\n",float(elapsedTime)/1000);
 }
 
 void commandWrite(String strCommand)
@@ -271,12 +379,26 @@ void setWrite() {
   delay(WCT);
 }
 
+void setDataPins(uint8_t IN_OUT) {
+  for (unsigned int pin = 0; pin < 8; pin+=1) {
+    pinMode(dataPin[pin], IN_OUT);
+  }
+  delay(WCT);
+}
+
+
 void setStandby() {
   for (unsigned int pin = 0; pin < addressSize; pin+=1) {
     pinMode(addressPin[pin], INPUT);
   }
   digitalWrite(CE, HIGH); 
   digitalWrite(OE, LOW);
+}
+
+void setAddressPin(uint8_t IN_OUT) {
+  for (unsigned int pin = 0; pin < addressSize; pin+=1) {
+    pinMode(addressPin[pin], IN_OUT);
+  }  
 }
 
 void setAddress(int address) {
@@ -341,7 +463,7 @@ void printContents(unsigned int startAddress, unsigned int endAddress ) {
       data[offset] = readEEPROM(base + offset);
     }
     char buf[60];
-    sprintf(buf, "%04x: %02x %02x %02x %02x %02x %02x %02x %02x     %02x %02x %02x %02x %02x %02x %02x %02x",
+    sprintf(buf, "%04x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x",
     base, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], 
     data[9], data[10], data[11], data[12], data[13], data[14], data[15]);
     Serial.println(buf);
