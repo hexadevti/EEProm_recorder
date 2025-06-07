@@ -50,10 +50,52 @@ void initialState() {
   Serial.println("OK");
 }
 
+// Read a line of data from the serial connection.
+char * readLine(char * buffer, int len)
+{
+    for (int ix = 0; (ix < len); ix++)
+    {
+         buffer[ix] = 0;
+    }
+
+    // read serial data until linebreak or buffer is full
+    char c = ' ';
+    int ix = 0;
+    do {
+        if (Serial.available())
+        {
+            c = Serial.read();
+            if ((c == '\b') && (ix > 0))
+            {
+                // Backspace, forget last character
+                --ix;
+            }
+            buffer[ix++] = c;
+            Serial.write(c);
+        }
+    } while ((c != '\n') && (c != '\r') && (ix < len));
+
+    buffer[ix - 1] = 0;
+    return buffer;
+}
+
+char line[120];
+
+String convertToString(char* a, int size)
+{
+    int i;
+    String s = "";
+    for (i = 0; i < size; i++) {
+        s = s + a[i];
+    }
+    return s;
+}
+
 void loop() {
 
-  if (Serial.available()) {
-    command = Serial.readStringUntil('\n');
+    Serial.flush();
+    readLine(line, sizeof(line));
+    command = convertToString(line, sizeof(line));
     command.trim();
     command.toLowerCase();
     if (command.startsWith("c ")) {
@@ -76,11 +118,12 @@ void loop() {
 
       commandWritePage(bin, sizeof(bin), true);
     }
-    else 
-    {
-      commandGo("g " + command);
-    }
-  }
+    // else 
+    // {
+    //     printf("g");
+    //   commandGo("g " + command);
+    // }
+  
 }
 
 
