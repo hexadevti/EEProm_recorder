@@ -11,9 +11,9 @@ const unsigned int addressPin[] = {35, 36, 37, 38, 39, 40, 41, 42, 25, 23, 17, 2
 
 // ..\SerialComm\bin\Debug\netcoreapp3.1\SerialComm.exe com6 115200
 XModem xmodem;
-byte chunkData[64];
-int addressSize = 15;
-uint16_t chunkSize = 64;
+#define chunkSize 64
+#define addressSize 15
+byte chunkData[chunkSize];
 uint16_t currentAddress = 0;
 const unsigned int WCT = 8; // 7;
 int maxAddress = 0;
@@ -21,6 +21,7 @@ const boolean logData = false;
 int size = 0;
 char buf[100];
 String command;
+String logTxt;
 
 void setup()
 {
@@ -171,7 +172,7 @@ void commandClear(String command)
     if (parmNo == 3)
     {
       dat = StrToDec(parm);
-      commandWritePage(startAddress, chunkData, endAddress - startAddress, true);
+      commandWritePage(startAddress, chunkData, endAddress - startAddress + 1, true);
       Serial.println();
       Serial.println("OK");
       break;
@@ -213,8 +214,6 @@ void commandRead(String strCommand)
   unsigned int parmNo = 0;
   unsigned int startAddress = 0;
   unsigned int endAddress = 0;
-
-  char buf[60];
 
   while (strCommand.length() > 0)
   {
@@ -317,15 +316,15 @@ void setData(byte data)
   }
 }
 
-void writeChunk(byte chunckData[], uint16_t address, uint16_t chunkSize)
+bool writeChunk(byte chunckData[], uint16_t address, uint8_t cSize, bool validate)
 {
   setAddressPin(OUTPUT);
   setDataPins(OUTPUT);
   setAddress(address, 0, addressSize);
   digitalWrite(WE, HIGH);
   digitalWrite(CE, LOW);
-  bool status = false;
-  for (int i = 0; i < chunkSize; i++)
+  digitalWrite(OE, HIGH);
+  for (int i = 0; i < cSize; i++)
   {
     // Set Address for chunck
     setAddress(address + i, 0, 6);
@@ -336,8 +335,11 @@ void writeChunk(byte chunckData[], uint16_t address, uint16_t chunkSize)
     delayMicroseconds(1);
     digitalWrite(WE, HIGH);
   }
-  status = waitForWriteCycleEnd(chunckData[chunkSize - 1]);
+  waitForWriteCycleEnd(chunckData[cSize - 1]);
   digitalWrite(CE, HIGH);
+  digitalWrite(OE, LOW);
+  return true;
+
 }
 
 void getDataFromProgmemOrValue(byte *rom, uint16_t position, uint16_t size, bool fixed, uint8_t value)
@@ -351,8 +353,7 @@ void getDataFromProgmemOrValue(byte *rom, uint16_t position, uint16_t size, bool
 
 void commandWritePage(uint16_t address, byte *rom, uint16_t size, bool clear)
 {
-
-  printf("Start recording...\n\n");
+  printf("Start recording at %04x...\n\n", address);
   unsigned long startTime = millis();
   uint16_t chunkQty = size / chunkSize;
   // print orientation
@@ -364,8 +365,8 @@ void commandWritePage(uint16_t address, byte *rom, uint16_t size, bool clear)
 
   for (uint16_t c = 0; c < chunkQty; c++)
   {
-    getDataFromProgmemOrValue(rom, c * chunkSize, chunkSize, clear, 0xff);
-    writeChunk(chunkData, address + c * chunkSize, chunkSize);
+    memset(chunkData, 0xff, sizeof(chunkData));
+    writeChunk(chunkData, address + c * chunkSize, chunkSize, false);
     printf("#");
   }
   unsigned long endTime = millis();
@@ -373,41 +374,71 @@ void commandWritePage(uint16_t address, byte *rom, uint16_t size, bool clear)
   printf("\n\ntime: %5.2fs\n", float(elapsedTime) / 1000);
 }
 
+
+
 bool process_block(void *blk_id, size_t idSize, byte *data, size_t dataSize)
 {
-  int chunkId = 0;
-  int chunk = 0;
-  for (int i = 0; i < dataSize; i++)
-  {
-    if (chunkId == 63)
-    {
-      writeChunk(chunkData, currentAddress, 64);
-      currentAddress = currentAddress + 64;
-      chunkId = 0;
-      chunk++;
+  //logTxt = logTxt + "dataSize " + dataSize + "\n";
+  int chuncks = dataSize / chunkSize;
+  //logTxt = logTxt + "chuncks " + chuncks + "\n"; 
+  int remaining = dataSize - chuncks * chunkSize;
+  //logTxt = logTxt + "remaining " + remaining + "\n"; 
+  int retry = 0;
+  // Full sized blocks
+  for (int chunkId=0; chunkId < chuncks;chunkId++) {
+    for (int i = 0;i<chunkSize; i++) {
+      chunkData[i] = data[chunkId*chunkSize+i];
     }
-    chunkData[chunkId] = data[i];
-    chunkId++;
+
+    if (!writeChunk(chunkData, currentAddress, chunkSize, false))
+    {
+      retry = 0;
+      bool valid = false;
+      while (valid == false && retry < 3)
+      {
+        logTxt = logTxt + "retrying\n"; 
+        valid = writeChunk(chunkData, currentAddress, chunkSize, true);
+        retry++;
+      }
+    }
+    currentAddress += chunkSize;
+  }
+  // Remaining data
+  if (remaining > 0) {
+    for (int i = 0;i < remaining; i++) {
+      chunkData[i] = data[chuncks*chunkSize+i];
+    }
+    if (!writeChunk(chunkData, currentAddress, remaining, false))
+    {
+      
+      retry = 0;
+      bool valid = false;
+      while (valid == false && retry < 3)
+      {
+        logTxt = logTxt + "retrying\n"; 
+        valid = writeChunk(chunkData, currentAddress, remaining, true);
+        retry++;
+      }
+    }
+    
+    currentAddress += remaining;
   }
 
-  writeChunk(chunkData, currentAddress, chunkId);
-
-  // return false to stop the transfer early
   return true;
 }
 
 void Upload(uint16_t address)
 {
+  logTxt = "";
   currentAddress = address;
   printf("Waiting for upload... in %04X\n\n", currentAddress);
   unsigned long startTime = millis();
   xmodem.begin(Serial, XModem::ProtocolType::XMODEM);
   xmodem.setRecieveBlockHandler(process_block);
 
-  while (!xmodem.receive())
-  {
-  }
+  while (!xmodem.receive()) { }
 
+  printf(logTxt.c_str());
   printf("Received.\n\n");
   unsigned long endTime = millis();
   unsigned long elapsedTime = endTime - startTime;
